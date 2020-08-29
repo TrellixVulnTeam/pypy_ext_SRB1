@@ -1,8 +1,11 @@
 import os
 import shutil
+import stat
 import struct
 import subprocess
 import sys
+from itertools import count
+from time import sleep
 
 
 def cmd_cd(path):
@@ -23,7 +26,7 @@ def cmd_copy(src, tgt):
 
 
 def cmd_xcopy(src, tgt):
-    return 'xcopy /Y /E "{src}" "{tgt}"'.format(**locals())
+    return 'xcopy /Y /E /I "{src}" "{tgt}"'.format(**locals())
 
 
 def cmd_mkdir(path):
@@ -94,6 +97,7 @@ architectures = {
     "x86": {
         "cpython_arch": "win32",
         "boehm_arch": "NT",
+        "boehm_target": r"Release\gc",
         "xz_arch": "i486",
         "tcl_arch": "IX86",
         "vcvars_arch": "x86",
@@ -102,6 +106,7 @@ architectures = {
     "x64": {
         "cpython_arch": "amd64",
         "boehm_arch": "NT_X64",
+        "boehm_target": r"gc64_dll",
         "xz_arch": "x86-64",
         "tcl_arch": "AMD64",
         "vcvars_arch": "x86_amd64",
@@ -126,7 +131,6 @@ deps = {
         "build": [
             cmd_copy("win32.mak", "ntwin32.mak"),
         ],
-        "headers": [r"*"],
     },
     "boehm": {
         "url": "https://hboehm.info/gc/gc_source/gc-7.1.tar.gz",
@@ -134,7 +138,12 @@ deps = {
         "dir": "gc-7.1",
         "patch": {
             r"misc.c": {
-                "void GC_abort(const char *msg)\n{{\n#   if defined(MSWIN32)": "void GC_abort(const char *msg)\n{{\n#   if 0",
+                "void GC_abort(const char *msg)\n"
+                "{{\n"
+                "#   if defined(MSWIN32)":
+                    "void GC_abort(const char *msg)\n"
+                    "{{\n"
+                    "#   if 0",
             },
             r"include\private\gc_priv.h": {
                 "# ifndef abs": "#if 0",
@@ -148,8 +157,8 @@ deps = {
             cmd_nmake("{boehm_arch}_THREADS_MAKEFILE", params="nodebug=1"),
         ],
         "headers": [r"include\gc.h"],
-        "libs": [r"Release\gc.lib", r"gc64_dll.lib"],
-        "bins": [r"Release\gc.dll", r"gc64_dll.dll"],
+        "libs": [r"{boehm_target}.lib"],
+        "bins": [r"{boehm_target}.dll"],
     },
     "zlib": {
         "url": "http://zlib.net/zlib1211.zip",
@@ -201,7 +210,7 @@ deps = {
                 "  const char * const fromLimBefore = fromLim;\n":
                     "  fromLimBefore = fromLim;\n",
                 "  const ptrdiff_t bytesToCopy = fromLim - *fromP;\n":
-                    "  bytesToCopy = fromLim - *fromP;\n"
+                    "  bytesToCopy = fromLim - *fromP;\n",
             },
         },
         "build": [
@@ -398,7 +407,7 @@ def write_script(name, lines):
     lines = [line.format(**prefs) for line in lines]
     print("Writing " + name)
     with open(name, "w") as f:
-        f.write("\n\r".join(lines))
+        f.write("\n".join(lines))
     if verbose:
         for line in lines:
             print("    " + line)
@@ -408,10 +417,13 @@ def get_footer(dep):
     lines = []
     for out in dep.get("headers", []):
         lines.append(cmd_copy(out, "{inc_dir}"))
+        lines.append("@if errorlevel 1 exit /B 1")
     for out in dep.get("libs", []):
         lines.append(cmd_copy(out, "{lib_dir}"))
+        lines.append("@if errorlevel 1 exit /B 1")
     for out in dep.get("bins", []):
         lines.append(cmd_copy(out, "{bin_dir}"))
+        lines.append("@if errorlevel 1 exit /B 1")
     return lines
 
 
@@ -450,13 +462,17 @@ def build_dep(name):
 
 def build_dep_all():
     lines = ["@echo on"]
+    enabled = []
     for dep_name in deps:
         if dep_name in disabled:
             continue
+        enabled.append(dep_name)
         lines.append(r'cmd.exe /c "{{build_dir}}\{}"'.format(build_dep(dep_name)))
         lines.append("@if errorlevel 1 @echo Build failed! && exit /B 1")
     lines.append("@echo All PyPy dependencies built successfully!")
     write_script("build_dep_all.cmd", lines)
+    write_script(".gitignore", ["*"])
+    print("Finished writing scripts for: " + ", ".join(enabled))
 
 
 if __name__ == "__main__":
@@ -502,6 +518,9 @@ if __name__ == "__main__":
         )
     print("Found Visual Studio at:", msvs["vs_dir"])
 
+    if "ntwin32.mak" not in disabled:
+        header.append(cmd_append("INCLUDE", "{build_dir}\\" + deps["ntwin32.mak"]["dir"]))
+
     print("Using output directory:", build_dir)
 
     # build directory for *.h files
@@ -513,7 +532,16 @@ if __name__ == "__main__":
 
     tcltk_dir = os.path.join(build_dir, "tcltk")
 
-    shutil.rmtree(build_dir, ignore_errors=True)
+    def rmtree_onerror(fn, path, excinfo):
+        if excinfo[0] is PermissionError and excinfo[1].winerror == 5:
+            os.chmod(path, stat.S_IWRITE)
+            fn(path)
+        elif excinfo[0] is FileNotFoundError:
+            pass
+        else:
+            raise
+
+    shutil.rmtree(build_dir, onerror=rmtree_onerror)
     for path in [build_dir, inc_dir, lib_dir, bin_dir, tcltk_dir]:
         os.makedirs(path)
 
