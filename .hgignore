@@ -1,0 +1,4 @@
+^cache/
+
+# default build directory
+^build

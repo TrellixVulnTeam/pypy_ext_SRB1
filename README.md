@@ -1,16 +1,16 @@
 This repository contains scripts which can be used to build PyPy dependencies on Windows.
 
-To run these scripts you must use Python 3.6+ and have Visual Studio 2017+ installed.
+To run these scripts you must use Python 3.6+ and have Visual Studio 2015 (preferred) or newer installed.
 
-These scripts were tested on x64 with VS 2017 Community (version 15.9.20).
+These scripts were tested on x64 with VS 2015 Community (version 14.0.25431.01 Update 3).
 
-Tcl/Tk fails to build, all other dependencies build successfully (some are downloaded pre-built).
+Tcl/Tk may fail to build on VS 2017 or newer, all other dependencies build successfully (some are downloaded pre-built).
 
 See `build_prepare.py` for details, based on https://foss.heptapod.net/pypy/externals/-/tree/branch/win32_160 readme.
 
-See branch `win64_150` for built binaries.
+See branch `win64_140` for built binaries.
 
-===========
+---
 
 To run a PyPy translation and some tests like rpython/jit/backend, you need:
 
@@ -33,6 +33,5 @@ set INCLUDE=d:\pypy\pypy\pypy_ext\build\include;%INCLUDE%
 set LIB=d:\pypy\pypy\pypy_ext\build\lib;%LIB%
 set PYTHONPATH=d:\pypy\pypy\pypy_ext\site-packages;%PYTHONPATH%
 
-"C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\VC\Auxiliary\Build\vcvars64.bat"
-# commands put here won't be run, put them before
+call "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\vcvarsall.bat" x86_amd64
 ```

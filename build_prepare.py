@@ -1,11 +1,9 @@
 import os
 import shutil
 import stat
-import struct
 import subprocess
 import sys
 from itertools import count
-from time import sleep
 
 
 def cmd_cd(path):
@@ -29,14 +27,6 @@ def cmd_xcopy(src, tgt):
     return 'xcopy /Y /E /I "{src}" "{tgt}"'.format(**locals())
 
 
-def cmd_mkdir(path):
-    return 'mkdir "{path}"'.format(**locals())
-
-
-def cmd_rmdir(path):
-    return 'rmdir /S /Q "{path}"'.format(**locals())
-
-
 def cmd_nmake(makefile=None, target="", params=None):
     if params is None:
         params = ""
@@ -56,43 +46,6 @@ def cmd_nmake(makefile=None, target="", params=None):
     ).format(**locals())
 
 
-def cmd_cmake(params=None, file="."):
-    if params is None:
-        params = ""
-    elif isinstance(params, list) or isinstance(params, tuple):
-        params = " ".join(params)
-    else:
-        params = str(params)
-    return " ".join(
-        [
-            "{{cmake}}",
-            "-DCMAKE_VERBOSE_MAKEFILE=ON",
-            "-DCMAKE_RULE_MESSAGES:BOOL=OFF",
-            "-DCMAKE_BUILD_TYPE=Release",
-            "{params}",
-            '-G "NMake Makefiles"',
-            '"{file}"',
-        ]
-    ).format(**locals())
-
-
-def cmd_msbuild(
-    file, configuration="Release", target="Build", platform="{msbuild_arch}"
-):
-    return " ".join(
-        [
-            "{{msbuild}}",
-            "{file}",
-            '/t:"{target}"',
-            '/p:Configuration="{configuration}"',
-            "/p:Platform={platform}",
-            "/m",
-        ]
-    ).format(**locals())
-
-
-SF_MIRROR = "http://iweb.dl.sourceforge.net"
-
 architectures = {
     "x86": {
         "cpython_arch": "win32",
@@ -101,7 +54,6 @@ architectures = {
         "xz_arch": "i486",
         "tcl_arch": "IX86",
         "vcvars_arch": "x86",
-        "msbuild_arch": "Win32",
     },
     "x64": {
         "cpython_arch": "amd64",
@@ -110,12 +62,11 @@ architectures = {
         "xz_arch": "x86-64",
         "tcl_arch": "AMD64",
         "vcvars_arch": "x86_amd64",
-        "msbuild_arch": "x64",
     },
 }
 
 header = [
-    cmd_set("INCLUDE", "{inc_dir}"),
+    cmd_set("INCLUDE", "{inc_dir};{aux_dir}"),
     cmd_set("INCLIB", "{lib_dir}"),
     cmd_set("LIB", "{lib_dir}"),
     cmd_append("PATH", "{bin_dir}"),
@@ -123,15 +74,6 @@ header = [
 
 # dependencies, listed in order of compilation
 deps = {
-    "ntwin32.mak": {
-        # ntwin32.mak is no longer distributed with Windows SDKs, needed for x64 Boehm GC
-        "url": "https://gist.github.com/ynkdir/688e62f419e5374347bf/archive/d250598ddf5129addd212b8390279a01bca12706.zip",
-        "filename": "688e62f419e5374347bf-d250598ddf5129addd212b8390279a01bca12706.zip",
-        "dir": "688e62f419e5374347bf-d250598ddf5129addd212b8390279a01bca12706",
-        "build": [
-            cmd_copy("win32.mak", "ntwin32.mak"),
-        ],
-    },
     "boehm": {
         "url": "https://hboehm.info/gc/gc_source/gc-7.1.tar.gz",
         "filename": "gc-7.1.tar.gz",
@@ -385,38 +327,8 @@ def find_msvs2015():
     if not os.path.isfile(vcvarsall):
         print("Visual Studio vcvarsall not found")
         return None
+    # ask for SDK 8.1, default SDK 10 is missing RC.exe
     vs["header"].append('call "{}" {{vcvars_arch}} 8.1'.format(vcvarsall))
-
-    try:
-        key = winreg.OpenKeyEx(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"Software\Microsoft\MSBuild\ToolsVersions",
-            access=winreg.KEY_READ | winreg.KEY_WOW64_32KEY,
-        )
-    except OSError:
-        print("MSBuild not found in registry")
-        return None
-
-    with key:
-        for i in count():
-            try:
-                v = winreg.EnumKey(key, i)
-            except OSError:
-                print("MSBuild 14.0 not found")
-                return None
-            try:
-                version = int(float(v))
-            except (ValueError, TypeError):
-                continue
-            if version == 14:
-                with winreg.OpenKeyEx(
-                    key, v, access=winreg.KEY_READ | winreg.KEY_WOW64_32KEY
-                ) as subkey:
-                    msbuild_dir, vt = winreg.QueryValueEx(subkey, "MSBuildToolsPath")
-                    msbuild = os.path.join(msbuild_dir, "MSBuild.exe")
-                    if vt == winreg.REG_SZ and os.path.isfile(msbuild):
-                        vs["msbuild"] = '"{}"'.format(msbuild)
-                        break
 
     return vs
 
@@ -463,26 +375,47 @@ def find_msvs():
         "vs_dir": vspath,
     }
 
-    # vs2017
-    msbuild = os.path.join(vspath, "MSBuild", "15.0", "Bin", "MSBuild.exe")
-    if os.path.isfile(msbuild):
-        vs["msbuild"] = '"{}"'.format(msbuild)
-    else:
-        # vs2019
-        msbuild = os.path.join(vspath, "MSBuild", "Current", "Bin", "MSBuild.exe")
-        if os.path.isfile(msbuild):
-            vs["msbuild"] = '"{}"'.format(msbuild)
-        else:
-            print("Visual Studio MSBuild not found")
-            return None
-
     vcvarsall = os.path.join(vspath, "VC", "Auxiliary", "Build", "vcvarsall.bat")
     if not os.path.isfile(vcvarsall):
         print("Visual Studio vcvarsall not found")
         return None
+    # you can specify an SDK version here if building Tcl/Tk 8.5 with VS 2017+
     vs["header"].append('call "{}" {{vcvars_arch}}'.format(vcvarsall))
 
     return vs
+
+
+def copy_win32mak():
+    import winreg
+    try:
+        key = winreg.OpenKeyEx(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\Microsoft SDKs\Windows",
+            access=winreg.KEY_READ | winreg.KEY_WOW64_32KEY,
+        )
+    except OSError:
+        print("Windows SDKs not found in registry")
+        return None
+
+    with key:
+        for i in count():
+            try:
+                v = winreg.EnumKey(key, i)
+            except OSError:
+                print("ntwin32.mak or win32.mak not found in installed SDKs")
+                return None
+            with winreg.OpenKeyEx(
+                key, v, access=winreg.KEY_READ | winreg.KEY_WOW64_32KEY
+            ) as subkey:
+                sdk_dir, vt = winreg.QueryValueEx(subkey, "InstallationFolder")
+                if vt == winreg.REG_SZ:
+                    sdk_include_dir = os.path.join(sdk_dir, "Include")
+                    tgts = ["Win32.Mak", "NtWin32.Mak"]
+                    ops = [(os.path.join(sdk_include_dir, t), os.path.join(aux_dir, t)) for t in tgts]
+                    if all(os.path.isfile(a) for a, b in ops):
+                        for a, b in ops:
+                            shutil.copyfile(a, b)
+                        return v
 
 
 def extract_dep(url, filename, dir=None):
@@ -548,7 +481,7 @@ def get_footer(dep):
 def build_dep(name):
     dep = deps[name]
     dir = dep["dir"]
-    file = "build_dep_{name}.cmd".format(**locals())
+    file = "build_{name}.cmd".format(**locals())
 
     extract_dep(dep["url"], dep["filename"], dep["dir"] if dep.get("dir-create", False) else None)
 
@@ -578,48 +511,54 @@ def build_dep(name):
     return file
 
 
-def build_dep_all():
+def build_all():
     lines = ["@echo on"]
     enabled = []
+    skipped = []
     for dep_name in deps:
         if dep_name in disabled:
+            skipped.append(dep_name)
             continue
         enabled.append(dep_name)
         lines.append(r'cmd.exe /c "{{build_dir}}\{}"'.format(build_dep(dep_name)))
         lines.append("@if errorlevel 1 @echo Build failed! && exit /B 1")
     lines.append("@echo All PyPy dependencies built successfully!")
-    write_script("build_dep_all.cmd", lines)
-    write_script(".gitignore", ["*"])
+    write_script("build_all.cmd", lines)
+
+    print()
     print("Finished writing scripts for: " + ", ".join(enabled))
+    print("Skipped disabled targets: " + ", ".join(skipped))
 
 
 if __name__ == "__main__":
     if sys.version_info < (3, 6, 0):
         raise RuntimeError("This script requires Python 3.6+")
 
-    # winbuild directory
+    # root directory
     winbuild_dir = os.path.dirname(os.path.realpath(__file__))
 
     verbose = False
     disabled = ["openssl-legacy"]
     depends_dir = os.path.join(winbuild_dir, "cache")
-    architecture = "x86"
+    architecture = "x64"
     build_dir = os.path.join(winbuild_dir, "build")
     force_tk = False
     for arg in sys.argv[1:]:
         if arg == "-v":
             verbose = True
         elif arg.startswith("--depends="):
-            depends_dir = arg[10:]
+            depends_dir = os.path.abspath(arg[10:])
         elif arg.startswith("--architecture="):
             architecture = arg[15:]
         elif arg.startswith("--dir="):
-            build_dir = arg[6:]
-        elif arg.startswith("--openssl-legacy"):
+            build_dir = os.path.abspath(arg[6:])
+        elif arg == "--legacy-openssl":
             disabled.remove("openssl-legacy")
             disabled.append("openssl")
-        elif arg.startswith("--with-tk"):
+        elif arg == "--with-tk":
             force_tk = True
+        elif arg == "--no-boehm":
+            disabled.append("boehm")
         else:
             raise ValueError("Unknown parameter: " + arg)
 
@@ -634,16 +573,13 @@ if __name__ == "__main__":
     if msvs is None:
         msvs = find_msvs()
         if not force_tk:
-            # Tk 8.5.2 requires Win SDK <= 10.0.15063.0, which is not available by default
+            # see warning below
             disabled.extend(["tcl", "tk"])
     if msvs is None:
         raise RuntimeError(
             "Visual Studio not found. Please install Visual Studio 2015 or newer."
         )
     print("Found Visual Studio at:", msvs["vs_dir"])
-
-    if "ntwin32.mak" not in disabled:
-        header.append(cmd_append("INCLUDE", "{build_dir}\\" + deps["ntwin32.mak"]["dir"]))
 
     print("Using output directory:", build_dir)
 
@@ -653,6 +589,8 @@ if __name__ == "__main__":
     lib_dir = os.path.join(build_dir, "lib")
     # build directory for *.bin files
     bin_dir = os.path.join(build_dir, "bin")
+    # build directory for auxiliary include files (win32.mak)
+    aux_dir = os.path.join(build_dir, "auxiliary")
 
     tcltk_dir = os.path.join(build_dir, "tcltk")
 
@@ -660,13 +598,12 @@ if __name__ == "__main__":
         if excinfo[0] is PermissionError and excinfo[1].winerror == 5:
             os.chmod(path, stat.S_IWRITE)
             fn(path)
-        elif excinfo[0] is FileNotFoundError:
-            pass
         else:
             raise
 
-    shutil.rmtree(build_dir, onerror=rmtree_onerror)
-    for path in [build_dir, inc_dir, lib_dir, bin_dir, tcltk_dir]:
+    if os.path.isdir(build_dir):
+        shutil.rmtree(build_dir, onerror=rmtree_onerror)
+    for path in [build_dir, inc_dir, lib_dir, bin_dir, aux_dir, tcltk_dir]:
         os.makedirs(path)
 
     prefs = {
@@ -679,15 +616,48 @@ if __name__ == "__main__":
         "inc_dir": inc_dir,
         "lib_dir": lib_dir,
         "bin_dir": bin_dir,
+        "aux_dir": aux_dir,
         "tcltk_dir": tcltk_dir,
         # Compilers / Tools
         **msvs,
-        "cmake": "cmake.exe",  # TODO find CMAKE automatically
-        # TODO find NASM automatically
         # script header
         "header": sum([header, msvs["header"], ["@echo on"]], []),
     }
 
     print()
+    write_script(
+        ".gitignore",
+        [
+            "/*",
+            "!/bin",
+            "!/bin/*.dll",
+            "!/lib",
+            "!/lib/*.lib",
+            "!/include",
+        ],
+    )
 
-    build_dep_all()
+    build_all()
+
+    if "boehm" not in disabled:
+        print()
+        xp_sdk = copy_win32mak()
+        if xp_sdk is None:
+            print("!!! ntwin32.mak or win32.mak not found, required by Boehm GC.")
+            print("!!! Install Windows XP support in VS2015 or older and rerun %s, "
+                  "or copy win32.mak and ntwin32.mak to '%s' before running build_all.cmd."
+                  % (os.path.basename(__file__), aux_dir))
+            print("!!! You can skip Boehm GC compilation by running '%s --no-boehm'."
+                  % os.path.basename(__file__))
+        else:
+            print("Copied ntwin32.mak and win32.mak from Windows SDK %s" % xp_sdk)
+
+    if "tk" in disabled:
+        print()
+        print("!!! Building Tcl/Tk is disabled for Visual Studio 2017 or later, "
+              "because Tk 8.5.2 requires Win SDK <= 10.0.15063.0, which is not available by default. "
+              "See https://core.tcl-lang.org/tk/tktview?name=3d34589aa0 for more information.")
+        print("!!! You can force Tcl/Tk compilation by running '%s --with-tk'. "
+              "You may have to specify the target SDK version in the function 'find_msvs()' "
+              "by replacing 'call \"{}\" {{vcvars_arch}}' with 'call \"{}\" {{vcvars_arch}} <sdk_version>'."
+              % os.path.basename(__file__))
