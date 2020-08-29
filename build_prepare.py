@@ -303,6 +303,82 @@ deps = {
 }
 
 
+# based on setuptools._distutils._msvccompiler version 50.0.0
+def find_msvs2015():
+    import winreg
+    try:
+        key = winreg.OpenKeyEx(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\VisualStudio\SxS\VC7",
+            access=winreg.KEY_READ | winreg.KEY_WOW64_32KEY,
+        )
+    except OSError:
+        print("Visual Studio not found in registry")
+        return None
+
+    with key:
+        for i in count():
+            try:
+                v, vc_dir, vt = winreg.EnumValue(key, i)
+            except OSError:
+                print("Visual Studio 2015 not found")
+                return None
+            if v and vt == winreg.REG_SZ and os.path.isdir(vc_dir):
+                try:
+                    version = int(float(v))
+                except (ValueError, TypeError):
+                    continue
+                if version == 14:
+                    vspath = vc_dir
+                    break
+
+    vs = {
+        "header": [],
+        # nmake selected by vcvarsall
+        "nmake": "nmake.exe",
+        "vs_dir": vspath,
+    }
+
+    vcvarsall = os.path.join(vspath, "vcvarsall.bat")
+    if not os.path.isfile(vcvarsall):
+        print("Visual Studio vcvarsall not found")
+        return None
+    vs["header"].append('call "{}" {{vcvars_arch}} 8.1'.format(vcvarsall))
+
+    try:
+        key = winreg.OpenKeyEx(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\Microsoft\MSBuild\ToolsVersions",
+            access=winreg.KEY_READ | winreg.KEY_WOW64_32KEY,
+        )
+    except OSError:
+        print("MSBuild not found in registry")
+        return None
+
+    with key:
+        for i in count():
+            try:
+                v = winreg.EnumKey(key, i)
+            except OSError:
+                print("MSBuild 14.0 not found")
+                return None
+            try:
+                version = int(float(v))
+            except (ValueError, TypeError):
+                continue
+            if version == 14:
+                with winreg.OpenKeyEx(
+                    key, v, access=winreg.KEY_READ | winreg.KEY_WOW64_32KEY
+                ) as subkey:
+                    msbuild_dir, vt = winreg.QueryValueEx(subkey, "MSBuildToolsPath")
+                    msbuild = os.path.join(msbuild_dir, "MSBuild.exe")
+                    if vt == winreg.REG_SZ and os.path.isfile(msbuild):
+                        vs["msbuild"] = '"{}"'.format(msbuild)
+                        break
+
+    return vs
+
+
 # based on distutils._msvccompiler from CPython 3.7.4
 def find_msvs():
     root = os.environ.get("ProgramFiles(x86)") or os.environ.get("ProgramFiles")
@@ -487,6 +563,7 @@ if __name__ == "__main__":
     depends_dir = os.path.join(winbuild_dir, "cache")
     architecture = "x86"
     build_dir = os.path.join(winbuild_dir, "build")
+    force_tk = False
     for arg in sys.argv[1:]:
         if arg == "-v":
             verbose = True
@@ -497,12 +574,12 @@ if __name__ == "__main__":
         elif arg.startswith("--dir="):
             build_dir = arg[6:]
         elif arg.startswith("--openssl-legacy"):
-            disabled = ["openssl"]
+            disabled.remove("openssl-legacy")
+            disabled.append("openssl")
+        elif arg.startswith("--with-tk"):
+            force_tk = True
         else:
             raise ValueError("Unknown parameter: " + arg)
-
-    # Tcl/Tk 8.5.2 are not compatible with MSVC 2017 and possibly also x64
-    disabled += ["tcl", "tk"]
 
     # dependency cache directory
     os.makedirs(depends_dir, exist_ok=True)
@@ -511,10 +588,15 @@ if __name__ == "__main__":
     arch_prefs = architectures[architecture]
     print("Target Architecture:", architecture)
 
-    msvs = find_msvs()
+    msvs = find_msvs2015()
+    if msvs is None:
+        msvs = find_msvs()
+        if not force_tk:
+            # Tk 8.5.2 requires Win SDK <= 10.0.15063.0, which is not available by default
+            disabled.extend(["tcl", "tk"])
     if msvs is None:
         raise RuntimeError(
-            "Visual Studio not found. Please install Visual Studio 2017 or newer."
+            "Visual Studio not found. Please install Visual Studio 2015 or newer."
         )
     print("Found Visual Studio at:", msvs["vs_dir"])
 
